@@ -8,14 +8,14 @@
 {% endblock %}
 
 {% block navbar %}
-<div class="navbar navbar" role="navigation">
+<div class="navbar" role="navigation">
     <div class="container">
         <div class="navbar-header">
-            <h1>Geistesblitze</h1>
+            <a class="navbar-brand" href="{{ url_for('get_ideas') }}">Geistesblitze</a>
         </div>
         <div class="navbar-collapse collapse">
             {% if current_user.is_authenticated %}
-            <ul class="nav navbar-nav navbor-left">
+            <ul class="nav navbar-nav navbar-left">
                 <li><a href="{{ url_for('add_idea') }}">Add Idea</a></li>
             </ul>
             {% endif %}
