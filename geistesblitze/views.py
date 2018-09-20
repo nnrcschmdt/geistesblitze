@@ -1,78 +1,145 @@
-from flask import render_template, redirect, flash, url_for
-from flask_login import login_required, login_user, logout_user, current_user
+from flask import jsonify, request, abort, g
+from flask_httpauth import HTTPBasicAuth
 
 from geistesblitze import app
-from geistesblitze.forms import AddIdeaForm, LoginForm, RegisterForm
 from geistesblitze.models import db, User, Idea
 
-
-@app.route('/')
-def index():
-    return render_template('index.html', register_form=RegisterForm(), login_form=LoginForm())
+auth = HTTPBasicAuth()
 
 
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    form = RegisterForm()
+@app.route('/api/users', methods=['POST'])
+def register_user():
+    """registers a new user."""
+    username = request.json.get('username')
+    password = request.json.get('password')
 
-    if form.validate_on_submit():
-        user = User(username=form.username.data, password=form.password.data)
-        db.session.add(user)
-        db.session.commit()
-        flash('Your account has been created')
-        return redirect(url_for('login'))
-    return render_template('register.html', form=form)
+    if username is None or password is None:
+        abort(400)
 
+    if User.query.filter_by(username=username).first() is not None:
+        abort(409)
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    form = LoginForm()
-    if form.validate_on_submit():
-        user = User.query.filter_by(username=form.username.data).first()
-        if user is not None and user.verify_password(form.password.data):
-            login_user(user, True)
-            return redirect(url_for('get_ideas'))
-        flash('Invalid username of password')
-    return render_template('login.html', form=form)
+    user = User(username=username, password=password)
+
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify(dict(id=user.id, username=user.username)), 201
 
 
-@app.route('/logout')
-def logout():
-    logout_user()
-    flash('You have been logged out')
-    return redirect(url_for('login'))
+@app.route('/api/users/<int:user_id>')
+def get_user(user_id):
+    """gets a user by id. No authentication is needed."""
+    user = User.query.get(user_id)
+
+    if not user:
+        abort(400)
+
+    return jsonify(dict(id=user.id, username=user.username))
 
 
-@app.route('/ideas/<int:id>')
-@login_required
-def get_idea(id):
-    idea = Idea.query.filter_by(id=id).first()
-    ideas = Idea.query.filter_by(user=current_user).all()
+@auth.verify_password
+def verify_password(username_or_token, password):
+    """verifies that the password given is correct for the username and sets the g object."""
+    user = User.verify_auth_token(username_or_token)
 
-    if idea is None:
-        return render_template('404.html'), 404
-    if idea.user != current_user:
-        return render_template('403.html'), 403
-    return render_template('idea.html', idea=idea, ideas=ideas)
+    if not user:
+        user = User.query.filter_by(username=username_or_token).first()
+        if not user or not user.verify_password(password):
+            return False
+
+    g.user = user
+
+    return True
 
 
-@app.route('/ideas')
-@login_required
+@app.route('/api/token')
+@auth.login_required
+def get_auth_token():
+    """generates an authentication token for the user."""
+    token = g.user.generate_auth_token()
+
+    return jsonify(dict(token=token.decode('ascii')))
+
+
+@app.route('/api/ideas/<int:idea_id>')
+@auth.login_required
+def get_idea(idea_id):
+    """gets an idea by id."""
+    idea = Idea.query.filter_by(id=idea_id).first()
+
+    if not idea:
+        abort(404)
+
+    if idea.user_id != g.user.id:
+        abort(403)
+
+    return jsonify(dict(id=idea.id, name=idea.name, description=idea.description))
+
+
+@app.route('/api/ideas/<int:idea_id>', methods=['DELETE'])
+@auth.login_required
+def delete_idea(idea_id):
+    """"deletes an idea by id."""
+    idea = Idea.query.filter_by(id=idea_id).first()
+
+    if not idea:
+        abort(404)
+
+    if idea.user_id != g.user.id:
+        abort(403)
+
+    db.session.delete(idea)
+    db.session.commit()
+
+    return "", 204
+
+
+@app.route('/api/ideas/')
+@auth.login_required
 def get_ideas():
-    ideas = Idea.query.filter_by(user=current_user).all()
-    return render_template('ideas.html', ideas=ideas)
+    """"gets all the ideas of the current user."""
+    ideas = [dict(id=idea.id, name=idea.name, description=idea.description)
+             for idea in Idea.query.filter_by(user=g.user).all()]
+
+    return jsonify(ideas)
 
 
-@app.route('/add_idea', methods=['GET', 'POST'])
-@login_required
+@app.route('/api/ideas/', methods=['POST'])
+@auth.login_required
 def add_idea():
-    form = AddIdeaForm()
+    """adds a new idea."""
+    name = request.json.get('name')
+    description = request.json.get('description')
 
-    if form.validate_on_submit():
-        idea = Idea(name=form.name.data, description=form.description.data)
-        idea.user = current_user
-        db.session.add(idea)
-        db.session.commit()
-        flash('Your idea has been saved')
-        return redirect(url_for('get_ideas'))
-    return render_template('add_idea.html', form=form)
+    idea = Idea(name=name, description=description)
+    idea.user = g.user
+
+    db.session.add(idea)
+    db.session.commit()
+
+    return jsonify(dict(id=idea.id, name=idea.name, description=idea.description)), 201
+
+
+@app.route('/api/ideas/<int:idea_id>', methods=['PUT'])
+@auth.login_required
+def update_idea(idea_id):
+    """updates an idea by id."""
+    idea = Idea.query.filter_by(id=idea_id).first()
+
+    name = request.json.get('name')
+    description = request.json.get('description')
+
+    if not idea:
+        abort(404)
+
+    if idea.user_id != g.user.id:
+        abort(403)
+
+    idea.name = name
+    idea.description = description
+
+    db.session.add(idea)
+    db.session.commit()
+
+    return jsonify(dict(id=idea.id, name=idea.name, description=idea.description)), 201
